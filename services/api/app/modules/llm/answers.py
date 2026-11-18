@@ -198,4 +198,9 @@ def create_answer_generator(settings: Settings) -> AnswerGenerator | None:
     except anthropic.AnthropicError:
         log.warning("answers.not_configured")
         return None
+    # The SDK builds a client without credentials and only fails on the first request.
+    # Check now, so /v1/ask can answer 503 instead of failing in the middle of a stream.
+    if client.api_key is None and client.auth_token is None and client.credentials is None:
+        log.warning("answers.not_configured")
+        return None
     return ClaudeAnswerGenerator(client, settings)
