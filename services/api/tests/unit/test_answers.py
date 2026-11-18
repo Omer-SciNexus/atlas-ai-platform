@@ -18,6 +18,7 @@ from app.modules.llm.answers import (
     Passage,
     TextDelta,
     build_user_content,
+    create_answer_generator,
 )
 from app.modules.rag.service import (
     NO_SOURCES_ANSWER,
@@ -243,3 +244,24 @@ async def test_a_citation_for_an_unknown_passage_is_dropped() -> None:
     answer = await collect_answer(answer_events(BadIndex(), "q", [_hit("Some text.")]))
     assert answer.segments[0].citations == []
     assert answer.done["grounded"] is False
+
+
+def _without_ambient_credentials(monkeypatch: pytest.MonkeyPatch, home: Any) -> None:
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    # Keeps a login profile on the developer's machine out of the test.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
+def test_no_generator_without_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    _without_ambient_credentials(monkeypatch, tmp_path)
+    assert create_answer_generator(make_settings()) is None
+
+
+def test_generator_is_created_from_the_configured_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _without_ambient_credentials(monkeypatch, tmp_path)
+    settings = make_settings(anthropic_api_key="sk-ant-test")
+    assert isinstance(create_answer_generator(settings), ClaudeAnswerGenerator)
