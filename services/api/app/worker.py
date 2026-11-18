@@ -14,6 +14,9 @@ import signal
 import httpx
 import structlog
 
+# Loads every model. The worker does not import the API routers, so without this
+# SQLAlchemy cannot resolve foreign keys to tables the worker never touches (users).
+import app.db.registry  # noqa: F401
 from app.core.config import Settings, get_settings
 from app.core.db import create_engine, create_sessionmaker
 from app.core.logging import configure_logging
