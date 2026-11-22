@@ -32,3 +32,6 @@ Thumbs.db
 # Local data
 data/
 *.log
+
+# Local image-generation workspace (finished images live in docs/assets and apps/web/public/images)
+art-inbox/
