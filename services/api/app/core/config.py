@@ -75,6 +75,10 @@ class Settings(BaseSettings):
         if self.is_production:
             if "atlas_app:atlas_app@" in self.database_url.get_secret_value():
                 raise ValueError("Default database credentials are not allowed outside local/test")
+            if "atlas:atlas@" in self.migration_database_url.get_secret_value():
+                raise ValueError(
+                    "Default migration database credentials are not allowed outside local/test"
+                )
             if not self.log_json:
                 raise ValueError("ATLAS_LOG_JSON must be true outside local/test")
             if any(
