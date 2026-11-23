@@ -4,9 +4,11 @@ import logging
 import uuid
 from collections.abc import Iterator
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.security import JwksCache, TokenVerifier
 from app.main import create_app
 from tests.support import FakeIdP, make_settings
 
@@ -100,3 +102,18 @@ def test_unhandled_error_keeps_request_id_in_header_and_log(idp: FakeIdP) -> Non
     error_logs = [r for r in records if "unhandled_error" in r]
     assert error_logs
     assert "req-boom" in error_logs[0]
+
+
+def test_identity_provider_outage_is_503_not_401() -> None:
+    async def failing_fetch() -> dict[str, object]:
+        raise httpx.ConnectError("idp down")
+
+    settings = make_settings()
+    app = create_app(settings)
+    app.state.token_verifier = TokenVerifier(settings, JwksCache(failing_fetch, ttl_seconds=600))
+    token = FakeIdP().token(tenant_id=TENANT)
+    with TestClient(app) as c:
+        resp = c.get("/v1/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 503
+    assert resp.headers["retry-after"] == "5"
+    assert resp.json()["detail"] == "Signing keys unavailable"
