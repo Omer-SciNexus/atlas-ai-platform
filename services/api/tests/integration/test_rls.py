@@ -92,3 +92,12 @@ async def test_app_role_cannot_create_or_rename_tenants(app_engine: AsyncEngine)
     with pytest.raises(DBAPIError, match="permission denied"):
         async with tenant_session(create_sessionmaker(app_engine), TENANT_A) as session:
             await session.execute(text("UPDATE tenants SET name = 'pwned'"))
+
+
+async def test_app_role_cannot_delete_users(
+    app_engine: AsyncEngine, owner_conn: asyncpg.Connection
+) -> None:
+    sub = await _insert_user(owner_conn, TENANT_A)
+    with pytest.raises(DBAPIError, match="permission denied"):
+        async with tenant_session(create_sessionmaker(app_engine), TENANT_A) as session:
+            await session.execute(text("DELETE FROM users WHERE oidc_sub = :s"), {"s": sub})
