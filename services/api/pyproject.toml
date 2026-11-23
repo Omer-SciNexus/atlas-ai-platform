@@ -60,7 +60,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["migrations/"]
 
 [[tool.mypy.overrides]]
-module = ["testcontainers.*"]
+module = ["testcontainers.*", "asyncpg.*", "docker.*"]
 ignore_missing_imports = true
 
 # ---------- pytest ----------

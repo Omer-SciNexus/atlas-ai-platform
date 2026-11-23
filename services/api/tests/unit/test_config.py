@@ -15,7 +15,7 @@ def test_env_files_are_anchored_to_the_project_not_the_working_directory() -> No
     assert all(Path(f).is_absolute() for f in env_files)
 
 
-_SAFE_PROD = {
+_SAFE_PROD: dict[str, Any] = {
     "env": "production",
     "log_json": True,
     "database_url": "postgresql+asyncpg://app:s3cret@db/atlas",

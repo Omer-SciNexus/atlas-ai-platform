@@ -71,7 +71,7 @@ async def test_rejects_hs256_key_confusion(idp: FakeIdP, verifier: TokenVerifier
 
 
 async def test_rejects_alg_none(verifier: TokenVerifier) -> None:
-    token = jwt.encode({"sub": "x"}, key=None, algorithm="none")
+    token = jwt.encode({"sub": "x"}, key=None, algorithm="none")  # type: ignore[arg-type]
     with pytest.raises(AuthError, match="Unsupported token algorithm"):
         await verifier.verify(token)
 
@@ -105,7 +105,7 @@ async def test_keeps_cached_keys_when_idp_is_down(idp: FakeIdP) -> None:
             raise httpx.ConnectError("idp down")
         return await idp.fetch_jwks()
 
-    cache = JwksCache(flaky_fetch, ttl_seconds=0, min_refresh_seconds=0)  # type: ignore[arg-type]
+    cache = JwksCache(flaky_fetch, ttl_seconds=0, min_refresh_seconds=0)
     verifier = TokenVerifier(make_settings(), cache)
     await verifier.verify(idp.token(tenant_id=TENANT))
     # TTL expired and the IdP is down, but the cached key still verifies.

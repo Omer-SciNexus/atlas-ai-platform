@@ -73,7 +73,7 @@ def db_urls() -> Iterator[DbUrls]:
     if not _docker_available():
         pytest.skip("Docker is not available; start Docker to run integration tests")
 
-    from testcontainers.postgres import PostgresContainer
+    from testcontainers.community.postgres import PostgresContainer
 
     with PostgresContainer(
         "pgvector/pgvector:pg16", username="atlas", password="atlas", dbname="atlas"
