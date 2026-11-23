@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import API_ROOT, REPO_ROOT, Settings
+from app.core.config import API_ROOT, REPO_ROOT, Settings, project_roots
 
 
 def test_env_files_are_anchored_to_the_project_not_the_working_directory() -> None:
@@ -13,6 +13,20 @@ def test_env_files_are_anchored_to_the_project_not_the_working_directory() -> No
     assert (API_ROOT / "pyproject.toml").exists()
     assert (REPO_ROOT / ".env.example").exists()
     assert all(Path(f).is_absolute() for f in env_files)
+
+
+@pytest.mark.parametrize(
+    ("config_file", "api_root", "repo_root"),
+    [
+        ("/src/atlas/services/api/app/core/config.py", "/src/atlas/services/api", "/src/atlas"),
+        # Docker image layout: the API lives at /app, so there is no monorepo above it.
+        ("/app/app/core/config.py", "/app", "/"),
+    ],
+)
+def test_project_roots_handles_shallow_layouts(
+    config_file: str, api_root: str, repo_root: str
+) -> None:
+    assert project_roots(Path(config_file)) == (Path(api_root), Path(repo_root))
 
 
 _SAFE_PROD: dict[str, Any] = {

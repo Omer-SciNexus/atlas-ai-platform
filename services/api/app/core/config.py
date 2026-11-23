@@ -11,10 +11,20 @@ from pathlib import Path
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
+def project_roots(config_file: Path) -> tuple[Path, Path]:
+    """Return (api_root, repo_root) for this file's location.
+
+    Uses ``.parent`` rather than ``.parents[n]`` so a shallow layout (the Docker image puts the
+    API at ``/app``, making the "repo root" ``/``) still works instead of raising IndexError.
+    """
+    api_root = config_file.resolve().parent.parent.parent
+    return api_root, api_root.parent.parent
+
+
 # Resolved from this file, not the working directory, so `.env` is found no matter where the
 # process starts (repo root, services/api, an IDE, a container).
-API_ROOT = Path(__file__).resolve().parents[2]  # services/api
-REPO_ROOT = API_ROOT.parents[1]
+API_ROOT, REPO_ROOT = project_roots(Path(__file__))
 
 
 class Environment(StrEnum):
