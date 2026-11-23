@@ -1,20 +1,18 @@
 """RFC 9457 problem+json error responses.
 
 Clients always get the same error shape, including the request id to quote in support
-tickets. Unhandled exceptions are logged with a stack trace but never leaked to the client.
+tickets. Unhandled exceptions are logged with a stack trace but never leaked to the client;
+that 500 is rendered by ``RequestContextMiddleware`` (see app/core/middleware.py).
 """
 
 from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any
 
-import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-
-log = structlog.get_logger(__name__)
 
 PROBLEM_JSON = "application/problem+json"
 
@@ -49,8 +47,3 @@ def register_error_handlers(app: FastAPI) -> None:
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         errors = [{"loc": list(e["loc"]), "msg": e["msg"], "type": e["type"]} for e in exc.errors()]
         return problem(request, 422, "Request validation failed", errors=errors)
-
-    @app.exception_handler(Exception)
-    async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
-        log.exception("unhandled_error", path=request.url.path)
-        return problem(request, 500, "Internal server error")

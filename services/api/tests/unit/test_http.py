@@ -1,5 +1,6 @@
 """HTTP behavior that needs no database: request ids, error shape, authn and authz gates."""
 
+import logging
 import uuid
 from collections.abc import Iterator
 
@@ -65,3 +66,37 @@ def test_viewer_cannot_read_audit_log(client: TestClient, idp: FakeIdP) -> None:
     resp = client.get("/v1/audit-events", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 403
     assert resp.json()["detail"] == "Missing permission: audit:read"
+
+
+def test_unhandled_error_keeps_request_id_in_header_and_log(idp: FakeIdP) -> None:
+    settings = make_settings()
+    app = create_app(settings)
+    app.state.token_verifier = idp.verifier(settings)
+
+    @app.get("/boom")
+    async def boom() -> None:
+        raise RuntimeError("secret internal detail")
+
+    records: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    handler = Capture()
+    logging.getLogger().addHandler(handler)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as c:
+            resp = c.get("/boom", headers={"X-Request-ID": "req-boom"})
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    assert resp.status_code == 500
+    assert resp.headers["content-type"].startswith("application/problem+json")
+    assert resp.headers["x-request-id"] == "req-boom"
+    body = resp.json()
+    assert body["request_id"] == "req-boom"
+    assert "secret internal detail" not in resp.text
+    error_logs = [r for r in records if "unhandled_error" in r]
+    assert error_logs
+    assert "req-boom" in error_logs[0]
