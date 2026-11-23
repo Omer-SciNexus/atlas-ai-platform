@@ -2,7 +2,9 @@
 
 ``CurrentPrincipal`` authenticates the caller; ``require(permission)`` authorizes them;
 ``TenantSession`` gives a database session already bound to the caller's tenant, so a
-handler cannot forget the tenant filter: row-level security applies it in Postgres.
+handler cannot forget the tenant filter: row-level security applies it in Postgres. It also
+refuses tenants that are not provisioned or are suspended, so every tenant-scoped endpoint
+gets that check, not only ``/v1/me``.
 """
 
 from collections.abc import AsyncIterator, Callable, Coroutine
@@ -11,6 +13,7 @@ from typing import Annotated, Any
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import tenant_session
@@ -65,6 +68,12 @@ async def get_tenant_session(
     request: Request, principal: CurrentPrincipal
 ) -> AsyncIterator[AsyncSession]:
     async with tenant_session(request.app.state.sessionmaker, principal.tenant_id) as session:
+        # RLS limits `tenants` to the caller's own row, so no WHERE clause is needed.
+        row = (await session.execute(text("SELECT status FROM tenants"))).first()
+        if row is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Tenant is not provisioned")
+        if row[0] != "active":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Tenant is suspended")
         yield session
 
 

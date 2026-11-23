@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from tests.integration.conftest import TENANT_A, TENANT_B, DbUrls
+from tests.integration.conftest import TENANT_A, TENANT_B, TENANT_SUSPENDED, DbUrls
 from tests.support import FakeIdP, make_settings
 
 
@@ -65,11 +65,20 @@ def test_audit_log_is_isolated_between_tenants(client: TestClient, idp: FakeIdP)
     assert any(e["actor_subject"] == carol_sub for e in globex_events)
 
 
-def test_unknown_tenant_is_forbidden(client: TestClient, idp: FakeIdP) -> None:
+@pytest.mark.parametrize("path", ["/v1/me", "/v1/audit-events"])
+def test_unknown_tenant_is_forbidden(client: TestClient, idp: FakeIdP, path: str) -> None:
     token = idp.token(tenant_id=uuid.uuid4(), roles=["owner"])
-    resp = client.get("/v1/me", headers=_auth(token))
+    resp = client.get(path, headers=_auth(token))
     assert resp.status_code == 403
     assert resp.json()["detail"] == "Tenant is not provisioned"
+
+
+@pytest.mark.parametrize("path", ["/v1/me", "/v1/audit-events"])
+def test_suspended_tenant_is_forbidden(client: TestClient, idp: FakeIdP, path: str) -> None:
+    token = idp.token(tenant_id=TENANT_SUSPENDED, roles=["owner"])
+    resp = client.get(path, headers=_auth(token))
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Tenant is suspended"
 
 
 def test_validation_error_is_problem_json(client: TestClient, idp: FakeIdP) -> None:
