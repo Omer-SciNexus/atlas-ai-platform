@@ -7,6 +7,7 @@ without extra setup. Secrets are ``SecretStr`` so they never appear in logs or r
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -71,6 +72,34 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # ---- Documents and ingestion ----
+    # Uploaded files, keyed by tenant and document id. Local disk now; S3 in the AWS phase.
+    blob_dir: Path = REPO_ROOT / "data" / "blobs"
+    max_upload_bytes: int = 25 * 1024 * 1024
+    chunk_size_chars: int = 1600
+    chunk_overlap_chars: int = 200
+    worker_concurrency: int = 2
+    worker_poll_seconds: float = 1.0
+    ingestion_max_attempts: int = 3
+    # A job still "running" after this long is assumed to belong to a dead worker.
+    ingestion_lock_timeout_seconds: int = 600
+
+    # ---- Embeddings ----
+    # "hash" is a keyless lexical embedder for local development and tests. It finds
+    # passages that share words with the question, not passages that share meaning.
+    embedding_provider: Literal["hash", "voyage"] = "hash"
+    embedding_model: str = "voyage-3.5"
+    voyage_api_key: SecretStr | None = None
+
+    # ---- Retrieval and answers ----
+    retrieval_top_k: int = 8
+    # Chunks scoring below this cosine similarity are not shown to the model.
+    retrieval_min_score: float = 0.0
+    anthropic_api_key: SecretStr | None = None
+    chat_model: str = "claude-opus-5-5"
+    chat_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    chat_max_tokens: int = 16_000
+
     @property
     def is_production(self) -> bool:
         return self.env in {Environment.STAGING, Environment.PRODUCTION}
@@ -96,6 +125,12 @@ class Settings(BaseSettings):
                 for alg in self.oidc_algorithms
             ):
                 raise ValueError("Only asymmetric JWT algorithms are allowed in production")
+            if self.embedding_provider == "hash":
+                raise ValueError("The hash embedder is for local/test only; use a real model")
+        if self.embedding_provider == "voyage" and self.voyage_api_key is None:
+            raise ValueError("ATLAS_VOYAGE_API_KEY is required when the provider is voyage")
+        if not 0 <= self.chunk_overlap_chars < self.chunk_size_chars:
+            raise ValueError("Chunk overlap must be smaller than the chunk size")
         return self
 
 

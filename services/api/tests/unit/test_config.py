@@ -36,6 +36,8 @@ _SAFE_PROD: dict[str, Any] = {
     "log_json": True,
     "database_url": "postgresql+asyncpg://app:s3cret@db/atlas",
     "migration_database_url": "postgresql+asyncpg://owner:s3cret@db/atlas",
+    "embedding_provider": "voyage",
+    "voyage_api_key": "test-key",
 }
 
 
@@ -53,6 +55,8 @@ def test_safe_production_settings_are_accepted() -> None:
         ),
         ({"log_json": False}, "ATLAS_LOG_JSON"),
         ({"oidc_algorithms": ["HS256"]}, "asymmetric"),
+        ({"embedding_provider": "hash"}, "hash embedder"),
+        ({"voyage_api_key": None}, "ATLAS_VOYAGE_API_KEY"),
     ],
 )
 def test_unsafe_production_settings_are_rejected(override: dict[str, Any], message: str) -> None:
