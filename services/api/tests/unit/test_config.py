@@ -26,7 +26,9 @@ def test_env_files_are_anchored_to_the_project_not_the_working_directory() -> No
 def test_project_roots_handles_shallow_layouts(
     config_file: str, api_root: str, repo_root: str
 ) -> None:
-    assert project_roots(Path(config_file)) == (Path(api_root), Path(repo_root))
+    # resolve() both sides: on Windows a POSIX-style path gains the current drive letter.
+    expected = (Path(api_root).resolve(), Path(repo_root).resolve())
+    assert project_roots(Path(config_file)) == expected
 
 
 _SAFE_PROD: dict[str, Any] = {
