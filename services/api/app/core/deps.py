@@ -18,7 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import tenant_session
 from app.core.rbac import Permission, has_permission
-from app.core.security import AuthError, Principal, TokenVerifier
+from app.core.security import (
+    AuthError,
+    IdentityProviderUnavailableError,
+    Principal,
+    TokenVerifier,
+)
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -40,6 +45,10 @@ async def get_principal(
     verifier: TokenVerifier = request.app.state.token_verifier
     try:
         principal = await verifier.verify(credentials.credentials)
+    except IdentityProviderUnavailableError as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(exc), headers={"Retry-After": "5"}
+        ) from None
     except AuthError as exc:
         raise _unauthorized(str(exc)) from None
 
