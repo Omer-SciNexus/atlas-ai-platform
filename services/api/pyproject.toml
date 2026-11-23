@@ -16,6 +16,10 @@ dependencies = [
     "pyjwt[crypto]>=2.10",
     "httpx>=0.28",
     "redis>=5.2",
+    "anthropic>=2.14.0",
+    "pgvector>=0.5.1",
+    "pypdf>=7.2.0",
+    "python-multipart>=0.0.34",
 ]
 
 [dependency-groups]
@@ -60,7 +64,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["migrations/"]
 
 [[tool.mypy.overrides]]
-module = ["testcontainers.*", "asyncpg.*", "docker.*"]
+module = ["testcontainers.*", "asyncpg.*", "docker.*", "pgvector.*"]
 ignore_missing_imports = true
 
 # ---------- pytest ----------
