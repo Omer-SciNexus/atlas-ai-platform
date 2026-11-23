@@ -68,4 +68,7 @@ async def get_tenant_session(
         yield session
 
 
-TenantSession = Annotated[AsyncSession, Depends(get_tenant_session)]
+# scope="function" commits (or rolls back) when the handler returns, *before* the response is
+# sent. With the default "request" scope the commit runs after the client already got a 2xx,
+# so a failed commit would silently lose the write.
+TenantSession = Annotated[AsyncSession, Depends(get_tenant_session, scope="function")]
