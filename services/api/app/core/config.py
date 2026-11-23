@@ -6,9 +6,15 @@ without extra setup. Secrets are ``SecretStr`` so they never appear in logs or r
 
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Resolved from this file, not the working directory, so `.env` is found no matter where the
+# process starts (repo root, services/api, an IDE, a container).
+API_ROOT = Path(__file__).resolve().parents[2]  # services/api
+REPO_ROOT = API_ROOT.parents[1]
 
 
 class Environment(StrEnum):
@@ -21,7 +27,9 @@ class Environment(StrEnum):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ATLAS_",
-        env_file=(".env", "../../.env"),
+        # Later files win: the repo-root .env (documented in .env.example) overrides
+        # services/api/.env.
+        env_file=(API_ROOT / ".env", REPO_ROOT / ".env"),
         extra="ignore",
     )
 
