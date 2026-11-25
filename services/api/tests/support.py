@@ -2,6 +2,7 @@
 
 import time
 import uuid
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,6 +12,14 @@ from jwt.algorithms import RSAAlgorithm
 
 from app.core.config import Environment, Settings
 from app.core.security import JwksCache, TokenVerifier
+from app.modules.llm.answers import (
+    AnswerEvent,
+    AnswerGenerationError,
+    Citation,
+    Finished,
+    Passage,
+    TextDelta,
+)
 
 ISSUER = "https://idp.test/realms/atlas"
 AUDIENCE = "atlas-api"
@@ -115,3 +124,35 @@ def minimal_pdf(pages: list[str]) -> bytes:
         f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
     )
     return bytes(out)
+
+
+@dataclass
+class ScriptedAnswerGenerator:
+    """Stands in for the model: answers with one cited sentence per call.
+
+    It quotes the start of the first passage, as the real API would, so tests can check
+    that citations are mapped back to the right document and position.
+    """
+
+    calls: list[tuple[str, list[Passage]]] = field(default_factory=list)
+    refuse: bool = False
+    fail: bool = False
+
+    async def stream_answer(
+        self, question: str, passages: Sequence[Passage]
+    ) -> AsyncIterator[AnswerEvent]:
+        self.calls.append((question, list(passages)))
+        if self.fail:
+            raise AnswerGenerationError("The model is temporarily unavailable.")
+        yield TextDelta(0, "According to the documents, ")
+        quote = passages[0].text[:30]
+        yield TextDelta(1, "this is ")
+        yield Citation(segment=1, passage_index=0, cited_text=quote, start_char=0, end_char=30)
+        yield TextDelta(1, "the answer.")
+        yield Finished(
+            model="scripted",
+            stop_reason="refusal" if self.refuse else "end_turn",
+            input_tokens=100,
+            output_tokens=20,
+            refused=self.refuse,
+        )
