@@ -117,3 +117,18 @@ def test_identity_provider_outage_is_503_not_401() -> None:
     assert resp.status_code == 503
     assert resp.headers["retry-after"] == "5"
     assert resp.json()["detail"] == "Signing keys unavailable"
+
+
+def test_ask_requires_authentication(client: TestClient) -> None:
+    assert client.post("/v1/ask", json={"question": "hi"}).status_code == 401
+
+
+def test_viewer_cannot_upload_documents(client: TestClient, idp: FakeIdP) -> None:
+    token = idp.token(tenant_id=TENANT, roles=["viewer"])
+    resp = client.post(
+        "/v1/documents",
+        files={"file": ("a.txt", b"hello", "text/plain")},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Missing permission: documents:write"
