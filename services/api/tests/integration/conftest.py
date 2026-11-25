@@ -20,6 +20,8 @@ API_ROOT = Path(__file__).resolve().parents[2]
 TENANT_A = UUID("3f6c1c2e-8a4b-4f0e-9d51-2b7a6c1e0a01")
 TENANT_B = UUID("9b2d7e4a-1c3f-4a8b-b6e2-5d4f3a2c1b02")
 TENANT_SUSPENDED = UUID("5e8a2b1c-7d3f-4c9e-a1b2-c3d4e5f60a03")
+# Active, and no test ever uploads a document to it.
+TENANT_EMPTY = UUID("7a1c9d3e-2b4f-4e6a-8c0d-1f2e3d4c5b04")
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,7 @@ async def _seed_tenants(raw_owner_url: str) -> None:
                 (TENANT_A, "acme", "Acme Financial", "active"),
                 (TENANT_B, "globex", "Globex Retail", "active"),
                 (TENANT_SUSPENDED, "initech", "Initech", "suspended"),
+                (TENANT_EMPTY, "hooli", "Hooli", "active"),
             ],
         )
     finally:
