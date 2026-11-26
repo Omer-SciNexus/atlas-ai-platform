@@ -8,6 +8,7 @@
     "db:migrate": "cd services/api && uv run alembic upgrade head",
     "db:seed": "cd services/api && uv run python scripts/seed.py",
     "api:dev": "cd services/api && uv run uvicorn app.main:app --reload --port 8000",
+    "worker:dev": "cd services/api && uv run python -m app.worker",
     "api:test": "cd services/api && uv run pytest",
     "api:lint": "cd services/api && uv run ruff check . && uv run ruff format --check . && uv run mypy app tests scripts"
   }
