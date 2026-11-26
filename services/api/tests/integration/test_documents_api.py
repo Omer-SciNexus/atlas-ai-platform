@@ -392,3 +392,107 @@ def test_delete_removes_the_document_its_chunks_and_its_file(env: Env) -> None:
     assert any(
         e["action"] == "document.deleted" and e["resource_id"] == document_id for e in events
     )
+
+
+# ---------- ingestion failures ----------
+
+
+def test_unreadable_file_fails_with_a_message_and_is_not_retried(env: Env) -> None:
+    document_id = env.upload(b"%PDF-1.4\nnot really a pdf", "broken.pdf").json()["id"]
+    env.run_worker()
+
+    document = env.document(document_id)
+    assert document["status"] == "failed"
+    assert document["error"]
+    assert document["chunk_count"] == 0
+    job = env.sql(
+        "SELECT status, attempts FROM ingestion_jobs WHERE document_id = $1",
+        uuid.UUID(document_id),
+    )[0]
+    assert (job["status"], job["attempts"]) == ("failed", 1)
+
+    events = env.client.get("/v1/audit-events?limit=50", headers=env.auth(role="admin")).json()
+    assert any(
+        e["action"] == "document.ingestion_failed" and e["resource_id"] == document_id
+        for e in events
+    )
+
+
+class _FailingEmbedder:
+    model = "failing"
+
+    def __init__(self, failures: int) -> None:
+        self.remaining = failures
+
+    async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        if self.remaining > 0:
+            self.remaining -= 1
+            raise EmbeddingError("Embedding provider unavailable")
+        return await HashEmbedder().embed_documents(texts)
+
+    async def embed_query(self, text: str) -> list[float]:
+        return await HashEmbedder().embed_query(text)
+
+
+def _make_due(env: Env, document_id: str) -> None:
+    env.sql(
+        "UPDATE ingestion_jobs SET run_after = now() WHERE document_id = $1",
+        uuid.UUID(document_id),
+    )
+
+
+def test_a_temporary_embedding_outage_is_retried_with_a_delay(env: Env) -> None:
+    env.run_worker()  # clear jobs left by other tests
+    document_id = env.upload(_report(_unique())).json()["id"]
+    embedder = _FailingEmbedder(failures=1)
+
+    assert env.run_worker(embedder) == 1
+    job = env.sql(
+        "SELECT status, attempts, last_error, run_after > now() AS delayed "
+        "FROM ingestion_jobs WHERE document_id = $1",
+        uuid.UUID(document_id),
+    )[0]
+    assert dict(job) == {
+        "status": "queued", "attempts": 1, "last_error": "EmbeddingError", "delayed": True,
+    }  # fmt: skip
+    assert env.document(document_id)["status"] == "processing"
+    assert env.run_worker(embedder) == 0  # not due yet
+
+    _make_due(env, document_id)
+    assert env.run_worker(embedder) == 1
+    assert env.document(document_id)["status"] == "ready"
+
+
+def test_ingestion_gives_up_after_the_maximum_attempts(env: Env) -> None:
+    env.run_worker()
+    document_id = env.upload(_report(_unique())).json()["id"]
+    embedder = _FailingEmbedder(failures=99)
+
+    for _ in range(env.settings.ingestion_max_attempts):
+        _make_due(env, document_id)
+        assert env.run_worker(embedder) == 1
+
+    document = env.document(document_id)
+    assert document["status"] == "failed"
+    assert document["error"] == "Ingestion failed after 3 attempts"
+    _make_due(env, document_id)
+    assert env.run_worker(embedder) == 0  # a failed job is never picked up again
+
+
+def test_a_job_left_by_a_dead_worker_is_taken_over(env: Env) -> None:
+    env.run_worker()
+    document_id = env.upload(_report(_unique())).json()["id"]
+    env.sql(
+        "UPDATE ingestion_jobs SET status = 'running', attempts = 1, "
+        "locked_at = now() - interval '1 hour' WHERE document_id = $1",
+        uuid.UUID(document_id),
+    )
+    assert env.run_worker() == 1
+    assert env.document(document_id)["status"] == "ready"
+
+
+def test_a_document_deleted_during_ingestion_is_skipped(env: Env) -> None:
+    env.run_worker()
+    document_id = env.upload(_report(_unique())).json()["id"]
+    assert env.client.delete(f"/v1/documents/{document_id}", headers=env.auth()).status_code == 204
+    assert env.run_worker() == 0  # its job went with it
