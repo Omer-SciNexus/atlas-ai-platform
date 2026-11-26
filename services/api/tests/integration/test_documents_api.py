@@ -261,3 +261,46 @@ def test_pdf_pages_are_kept_for_citations(env: Env) -> None:
     assert len(results) == 1
     assert token in results[0]["content"]
     assert results[0]["page"] in (1, 2)  # both short pages fit in one chunk, labeled by its start
+
+
+# ---------- tenant isolation ----------
+
+
+def test_documents_and_search_are_isolated_between_tenants(env: Env) -> None:
+    token = _unique()
+    document_id = env.upload(_report(token), tenant=TENANT_A).json()["id"]
+    env.upload(f"Globex has its own notes. {_unique('opal')} is mentioned here.", tenant=TENANT_B)
+    env.run_worker()
+
+    other = env.auth(TENANT_B, role="owner")
+    assert env.client.get(f"/v1/documents/{document_id}", headers=other).status_code == 404
+    assert env.client.delete(f"/v1/documents/{document_id}", headers=other).status_code == 404
+    listed = env.client.get("/v1/documents?limit=100", headers=other).json()["items"]
+    assert document_id not in [d["id"] for d in listed]
+
+    # The other tenant searches for the exact made-up word and still gets none of it.
+    results = env.client.post(
+        "/v1/search", json={"query": token, "top_k": 50}, headers=other
+    ).json()["results"]
+    assert results  # it has its own document
+    assert all(r["document_id"] != document_id for r in results)
+    assert all(token not in r["content"] for r in results)
+
+    assert env.document(document_id)["status"] == "ready"  # untouched by the 404 delete
+
+
+def test_tenant_without_documents_gets_no_answer_and_no_model_call(env: Env) -> None:
+    env.upload(_report(_unique()))
+    env.run_worker()
+
+    resp = env.client.post(
+        "/v1/ask",
+        json={"question": "What was the capital ratio?", "stream": False},
+        headers=env.auth(TENANT_EMPTY),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["answer"] == NO_SOURCES_ANSWER
+    assert body["sources"] == []
+    assert body["grounded"] is False
+    assert env.generator.calls == []
