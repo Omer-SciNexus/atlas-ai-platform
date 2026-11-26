@@ -541,3 +541,31 @@ def test_request_validation(env: Env) -> None:
     ]:
         resp = env.client.post(path, json=body, headers=env.auth())
         assert resp.status_code == 422, path
+
+
+# ---------- the worker process loop ----------
+
+
+def test_worker_loop_ingests_and_stops_cleanly(env: Env) -> None:
+    document_id = env.upload(_report(_unique())).json()["id"]
+
+    async def run_until_ready() -> str:
+        stop = asyncio.Event()
+        task = asyncio.create_task(worker.run(env.settings, stop))
+        conn = await asyncpg.connect(env.db_urls.owner_raw)
+        try:
+            status = "pending"
+            for _ in range(200):
+                status = await conn.fetchval(
+                    "SELECT status FROM documents WHERE id = $1", uuid.UUID(document_id)
+                )
+                if status in ("ready", "failed"):
+                    break
+                await asyncio.sleep(0.05)
+            return status
+        finally:
+            await conn.close()
+            stop.set()
+            await asyncio.wait_for(task, timeout=10)  # returns: the loops saw the stop event
+
+    assert asyncio.run(run_until_ready()) == "ready"
