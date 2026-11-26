@@ -496,3 +496,48 @@ def test_a_document_deleted_during_ingestion_is_skipped(env: Env) -> None:
     document_id = env.upload(_report(_unique())).json()["id"]
     assert env.client.delete(f"/v1/documents/{document_id}", headers=env.auth()).status_code == 204
     assert env.run_worker() == 0  # its job went with it
+
+
+# ---------- model availability ----------
+
+
+def test_ask_without_a_configured_model_is_503_but_search_works(
+    make_env: Callable[..., Env],
+) -> None:
+    env = make_env(with_model=False)
+    env.upload(_report(_unique()))
+    env.run_worker()
+
+    asked = env.client.post("/v1/ask", json={"question": "anything"}, headers=env.auth())
+    assert asked.status_code == 503
+    assert "not configured" in asked.json()["detail"]
+    found = env.client.post("/v1/search", json={"query": "capital"}, headers=env.auth())
+    assert found.status_code == 200
+
+
+def test_model_failure_is_503_or_an_error_event(make_env: Callable[..., Env]) -> None:
+    env = make_env(generator=ScriptedAnswerGenerator(fail=True))
+    env.upload(_report(_unique()))
+    env.run_worker()
+
+    plain = env.client.post(
+        "/v1/ask", json={"question": "capital?", "stream": False}, headers=env.auth()
+    )
+    assert plain.status_code == 503
+    assert plain.json()["detail"] == "The model is temporarily unavailable."
+
+    streamed = env.client.post("/v1/ask", json={"question": "capital?"}, headers=env.auth())
+    assert streamed.status_code == 200
+    events = _sse(streamed.text)
+    assert [name for name, _ in events] == ["sources", "error"]
+    assert events[-1][1] == {"detail": "The model is temporarily unavailable."}
+
+
+def test_request_validation(env: Env) -> None:
+    for path, body in [
+        ("/v1/ask", {"question": ""}),
+        ("/v1/ask", {"question": "ok", "top_k": 0}),
+        ("/v1/search", {"query": "x" * 2001}),
+    ]:
+        resp = env.client.post(path, json=body, headers=env.auth())
+        assert resp.status_code == 422, path
