@@ -1,0 +1,263 @@
+"""Documents, ingestion, search and answers end to end: real app, real Postgres + pgvector.
+
+The embedder is the keyless hash embedder and the model is scripted, so these tests are
+deterministic and need no API keys. The worker is run in-process, one job at a time.
+"""
+
+import asyncio
+import json
+import uuid
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import asyncpg
+import pytest
+from fastapi.testclient import TestClient
+
+from app import worker
+from app.core.config import Settings
+from app.core.db import create_engine, create_sessionmaker
+from app.main import create_app
+from app.modules.documents.blobs import LocalBlobStore
+from app.modules.ingestion.pipeline import IngestionDeps, process_next_job
+from app.modules.llm.embeddings import Embedder, EmbeddingError, HashEmbedder
+from app.modules.rag.service import NO_SOURCES_ANSWER
+from app.modules.retrieval.store import PgVectorStore
+from tests.integration.conftest import TENANT_A, TENANT_B, TENANT_EMPTY, DbUrls
+from tests.support import FakeIdP, ScriptedAnswerGenerator, make_settings, minimal_pdf
+
+MAX_UPLOAD = 200_000
+
+
+@dataclass
+class Env:
+    client: TestClient
+    idp: FakeIdP
+    settings: Settings
+    blob_dir: Path
+    generator: ScriptedAnswerGenerator
+    db_urls: DbUrls
+
+    def auth(self, tenant: uuid.UUID = TENANT_A, role: str = "editor") -> dict[str, str]:
+        token = self.idp.token(sub=f"{role}-{tenant.hex[:6]}", tenant_id=tenant, roles=[role])
+        return {"Authorization": f"Bearer {token}"}
+
+    def upload(
+        self,
+        content: bytes | str,
+        filename: str = "notes.md",
+        *,
+        tenant: uuid.UUID = TENANT_A,
+        title: str | None = None,
+    ) -> Any:
+        data = content.encode() if isinstance(content, str) else content
+        return self.client.post(
+            "/v1/documents",
+            files={"file": (filename, data, "application/octet-stream")},
+            data={"title": title} if title else None,
+            headers=self.auth(tenant),
+        )
+
+    def document(self, document_id: str, tenant: uuid.UUID = TENANT_A) -> dict[str, Any]:
+        resp = self.client.get(f"/v1/documents/{document_id}", headers=self.auth(tenant))
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+    def run_worker(self, embedder: Embedder | None = None, *, max_jobs: int = 50) -> int:
+        """Process queued jobs the way the worker process does. Returns how many ran."""
+
+        async def drain() -> int:
+            # Its own engine: the app's engine belongs to the test client's event loop.
+            engine = create_engine(self.settings)
+            deps = IngestionDeps(
+                settings=self.settings,
+                sessionmaker=create_sessionmaker(engine),
+                blobs=LocalBlobStore(self.blob_dir),
+                embedder=embedder or HashEmbedder(),
+                vectors=PgVectorStore(),
+            )
+            try:
+                count = 0
+                while count < max_jobs and await process_next_job(deps):
+                    count += 1
+                return count
+            finally:
+                await engine.dispose()
+
+        return asyncio.run(drain())
+
+    def sql(self, query: str, *args: Any) -> list[asyncpg.Record]:
+        """Run SQL as the owner role, to set up or inspect state the API does not expose."""
+
+        async def run() -> list[asyncpg.Record]:
+            conn = await asyncpg.connect(self.db_urls.owner_raw)
+            try:
+                rows: list[asyncpg.Record] = await conn.fetch(query, *args)
+                return rows
+            finally:
+                await conn.close()
+
+        return asyncio.run(run())
+
+
+@pytest.fixture
+def make_env(db_urls: DbUrls, tmp_path: Path) -> Iterator[Callable[..., Env]]:
+    clients: list[TestClient] = []
+
+    def build(*, with_model: bool = True, generator: ScriptedAnswerGenerator | None = None) -> Env:
+        settings = make_settings(
+            database_url=db_urls.app,
+            blob_dir=tmp_path / "blobs",
+            max_upload_bytes=MAX_UPLOAD,
+            worker_poll_seconds=0.05,
+            # Small chunks, so a three-section test document becomes three chunks.
+            chunk_size_chars=200,
+            chunk_overlap_chars=40,
+        )
+        idp = FakeIdP()
+        generator = generator or ScriptedAnswerGenerator()
+        app = create_app(settings)
+        app.state.token_verifier = idp.verifier(settings)
+        app.state.answer_generator = generator if with_model else None
+        client = TestClient(app)
+        client.__enter__()
+        clients.append(client)
+        return Env(client, idp, settings, tmp_path / "blobs", generator, db_urls)
+
+    yield build
+    for client in clients:
+        client.__exit__(None, None, None)
+
+
+@pytest.fixture
+def env(make_env: Callable[..., Env]) -> Env:
+    return make_env()
+
+
+def _unique(word: str = "zircon") -> str:
+    """A made-up word no other test's documents contain, so searches are unambiguous."""
+    return f"{word}{uuid.uuid4().hex[:10]}"
+
+
+def _report(token: str) -> str:
+    return (
+        "# Annual report\n\n"
+        "General remarks about the year and the conditions the bank operated in.\n\n"
+        f"## Capital\n\nThe {token} ratio was 13.1 percent at year end. "
+        "It was above the regulatory minimum.\n\n"
+        "## Outlook\n\nManagement expects stable deposits next year.\n"
+    )
+
+
+def _sse(text: str) -> list[tuple[str, dict[str, Any]]]:
+    events = []
+    for block in text.strip().split("\n\n"):
+        name, data = block.split("\n", 1)
+        events.append((name.removeprefix("event: "), json.loads(data.removeprefix("data: "))))
+    return events
+
+
+# ---------- the main flow ----------
+
+
+def test_upload_ingest_search_and_ask(env: Env) -> None:
+    token = _unique()
+    created = env.upload(_report(token), "annual_report-2025.md")
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["status"] == "pending"
+    assert body["title"] == "annual report 2025"
+    assert body["mime_type"] == "text/markdown"
+    document_id = body["id"]
+
+    assert env.run_worker() >= 1
+    document = env.document(document_id)
+    assert document["status"] == "ready"
+    assert document["chunk_count"] >= 1
+    assert document["error"] is None
+
+    # Search: the passage with the made-up word comes first, with its section heading.
+    found = env.client.post(
+        "/v1/search", json={"query": f"What was the {token} ratio?"}, headers=env.auth()
+    )
+    assert found.status_code == 200, found.text
+    top = found.json()["results"][0]
+    assert top["document_id"] == document_id
+    assert token in top["content"]
+    assert top["heading"] == "Capital"
+    assert 0 < top["score"] <= 1
+
+    # Ask: the answer cites the uploaded document.
+    asked = env.client.post(
+        "/v1/ask",
+        json={"question": f"What was the {token} ratio?", "stream": False},
+        headers=env.auth(role="viewer"),
+    )
+    assert asked.status_code == 200, asked.text
+    answer = asked.json()
+    assert answer["answer"] == "According to the documents, this is the answer."
+    assert answer["grounded"] is True
+    assert answer["model"] == "scripted"
+    assert answer["usage"] == {"input_tokens": 100, "output_tokens": 20}
+    assert answer["sources"][0]["document_id"] == document_id
+    citation = answer["segments"][1]["citations"][0]
+    assert citation["document_id"] == document_id
+    assert citation["document_title"] == "annual report 2025"
+    assert citation["cited_text"] == top["content"][:30]
+
+    # The model saw the retrieved passages, and nothing from the request but the question.
+    question, passages = env.generator.calls[-1]
+    assert question == f"What was the {token} ratio?"
+    assert passages[0].text == top["content"]
+
+    events = env.client.get("/v1/audit-events?limit=200", headers=env.auth(role="admin")).json()
+    by_action: dict[str, Any] = {}
+    for event in events:  # newest first: keep the newest event of each kind
+        if event["resource_id"] in (document_id, None):
+            by_action.setdefault(event["action"], event)
+    assert by_action["document.uploaded"]["details"]["filename"] == "annual_report-2025.md"
+    assert by_action["document.ingested"]["actor_subject"] == "system:ingestion-worker"
+    asked_event = by_action["rag.asked"]
+    assert top["chunk_id"] in asked_event["details"]["chunk_ids"]
+    assert token not in json.dumps(asked_event)  # the question text is not stored
+
+
+def test_ask_streams_server_sent_events(env: Env) -> None:
+    token = _unique()
+    document_id = env.upload(_report(token)).json()["id"]
+    env.run_worker()
+
+    resp = env.client.post(
+        "/v1/ask", json={"question": f"Tell me about {token}"}, headers=env.auth()
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert resp.headers["cache-control"] == "no-cache"
+    assert resp.headers["x-request-id"]
+
+    events = _sse(resp.text)
+    assert [name for name, _ in events] == [
+        "sources", "delta", "delta", "citation", "delta", "done",
+    ]  # fmt: skip
+    assert events[0][1]["sources"][0]["document_id"] == document_id
+    assert events[3][1]["segment"] == 1
+    assert events[3][1]["document_id"] == document_id
+    assert events[-1][1]["grounded"] is True
+
+
+def test_pdf_pages_are_kept_for_citations(env: Env) -> None:
+    token = _unique("quartz")
+    pdf = minimal_pdf(["Cover page of the filing.", f"The {token} reserve was 2.4 billion."])
+    document_id = env.upload(pdf, "filing.pdf").json()["id"]
+    env.run_worker()
+    assert env.document(document_id)["status"] == "ready"
+
+    results = env.client.post(
+        "/v1/search", json={"query": f"{token} reserve", "top_k": 1}, headers=env.auth()
+    ).json()["results"]
+    assert len(results) == 1
+    assert token in results[0]["content"]
+    assert results[0]["page"] in (1, 2)  # both short pages fit in one chunk, labeled by its start
