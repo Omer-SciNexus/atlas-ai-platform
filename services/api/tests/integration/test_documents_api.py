@@ -304,3 +304,91 @@ def test_tenant_without_documents_gets_no_answer_and_no_model_call(env: Env) -> 
     assert body["sources"] == []
     assert body["grounded"] is False
     assert env.generator.calls == []
+
+
+# ---------- uploads ----------
+
+
+def test_duplicate_upload_returns_the_existing_document(env: Env) -> None:
+    content = _report(_unique())
+    first = env.upload(content)
+    second = env.upload(content, "renamed.md")
+    assert (first.status_code, second.status_code) == (201, 200)
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["filename"] == "notes.md"
+
+    # The same bytes in another tenant are that tenant's own document.
+    other = env.upload(content, tenant=TENANT_B)
+    assert other.status_code == 201
+    assert other.json()["id"] != first.json()["id"]
+
+
+def test_custom_title_and_unsafe_filename(env: Env) -> None:
+    resp = env.upload(_report(_unique()), "..\\..\\evil/../report.md", title="  Q3 Board Pack ")
+    assert resp.status_code == 201
+    assert resp.json()["title"] == "Q3 Board Pack"
+    assert resp.json()["filename"] == "report.md"
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "status", "detail"),
+    [
+        ("tool.exe", b"MZ\x90\x00", 415, "Unsupported file type"),
+        ("renamed.pdf", b"just text, not a pdf", 415, "does not match"),
+        ("blank.txt", b"  \n\n  ", 422, "File is empty"),
+        ("big.txt", b"a" * (MAX_UPLOAD + 1), 413, "larger than"),
+    ],
+)
+def test_bad_uploads_are_rejected(
+    env: Env, filename: str, content: bytes, status: int, detail: str
+) -> None:
+    resp = env.upload(content, filename)
+    assert resp.status_code == status
+    assert detail in resp.json()["detail"]
+    assert resp.headers["content-type"].startswith("application/problem+json")
+
+
+def test_list_is_paged_newest_first(env: Env) -> None:
+    tenant_docs = [env.upload(_report(_unique())).json()["id"] for _ in range(3)]
+
+    seen: list[str] = []
+    cursor: str | None = None
+    for _ in range(200):
+        params = {"limit": 2} | ({"cursor": cursor} if cursor else {})
+        page = env.client.get("/v1/documents", params=params, headers=env.auth()).json()
+        assert len(page["items"]) <= 2
+        seen.extend(d["id"] for d in page["items"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+
+    assert len(seen) == len(set(seen))  # no row twice
+    assert seen[:3] == tenant_docs[::-1]  # newest first
+    bad = env.client.get("/v1/documents?cursor=garbage", headers=env.auth())
+    assert bad.status_code == 422
+
+
+def test_delete_removes_the_document_its_chunks_and_its_file(env: Env) -> None:
+    token = _unique()
+    document_id = env.upload(_report(token)).json()["id"]
+    env.run_worker()
+    blob = env.blob_dir / str(TENANT_A) / document_id
+    assert blob.exists()
+
+    viewer = env.client.delete(f"/v1/documents/{document_id}", headers=env.auth(role="viewer"))
+    assert viewer.status_code == 403
+    deleted = env.client.delete(f"/v1/documents/{document_id}", headers=env.auth())
+    assert deleted.status_code == 204
+
+    assert env.client.get(f"/v1/documents/{document_id}", headers=env.auth()).status_code == 404
+    assert not blob.exists()
+    doc_uuid = uuid.UUID(document_id)
+    assert env.sql("SELECT 1 FROM document_chunks WHERE document_id = $1", doc_uuid) == []
+    assert env.sql("SELECT 1 FROM ingestion_jobs WHERE document_id = $1", doc_uuid) == []
+    results = env.client.post("/v1/search", json={"query": token}, headers=env.auth()).json()
+    assert all(r["document_id"] != document_id for r in results["results"])
+
+    events = env.client.get("/v1/audit-events?limit=50", headers=env.auth(role="admin")).json()
+    assert any(
+        e["action"] == "document.deleted" and e["resource_id"] == document_id for e in events
+    )
