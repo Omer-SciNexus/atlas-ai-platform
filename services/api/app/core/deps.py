@@ -2,7 +2,9 @@
 
 ``CurrentPrincipal`` authenticates the caller; ``require(permission)`` authorizes them;
 ``TenantSession`` gives a database session already bound to the caller's tenant, so a
-handler cannot forget the tenant filter: row-level security applies it in Postgres.
+handler cannot forget the tenant filter: row-level security applies it in Postgres. It also
+refuses tenants that are not provisioned or are suspended, so every tenant-scoped endpoint
+gets that check, not only ``/v1/me``.
 """
 
 from collections.abc import AsyncIterator, Callable, Coroutine
@@ -11,11 +13,17 @@ from typing import Annotated, Any
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import tenant_session
 from app.core.rbac import Permission, has_permission
-from app.core.security import AuthError, Principal, TokenVerifier
+from app.core.security import (
+    AuthError,
+    IdentityProviderUnavailableError,
+    Principal,
+    TokenVerifier,
+)
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -37,6 +45,10 @@ async def get_principal(
     verifier: TokenVerifier = request.app.state.token_verifier
     try:
         principal = await verifier.verify(credentials.credentials)
+    except IdentityProviderUnavailableError as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(exc), headers={"Retry-After": "5"}
+        ) from None
     except AuthError as exc:
         raise _unauthorized(str(exc)) from None
 
@@ -65,7 +77,16 @@ async def get_tenant_session(
     request: Request, principal: CurrentPrincipal
 ) -> AsyncIterator[AsyncSession]:
     async with tenant_session(request.app.state.sessionmaker, principal.tenant_id) as session:
+        # RLS limits `tenants` to the caller's own row, so no WHERE clause is needed.
+        row = (await session.execute(text("SELECT status FROM tenants"))).first()
+        if row is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Tenant is not provisioned")
+        if row[0] != "active":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Tenant is suspended")
         yield session
 
 
-TenantSession = Annotated[AsyncSession, Depends(get_tenant_session)]
+# scope="function" commits (or rolls back) when the handler returns, *before* the response is
+# sent. With the default "request" scope the commit runs after the client already got a 2xx,
+# so a failed commit would silently lose the write.
+TenantSession = Annotated[AsyncSession, Depends(get_tenant_session, scope="function")]

@@ -10,23 +10,16 @@ from app.modules.audit import service as audit
 from app.modules.tenants.models import Tenant, User
 
 
-class TenantNotProvisionedError(Exception):
-    """The token names a tenant that does not exist (or is not visible) in Atlas."""
-
-
-class TenantSuspendedError(Exception):
-    pass
-
-
 @dataclass(frozen=True, slots=True)
 class CurrentUser:
     user: User
     tenant: Tenant
 
 
-async def get_current_tenant(session: AsyncSession) -> Tenant | None:
-    # RLS limits `tenants` to the row whose id matches the session's tenant.
-    return await session.scalar(select(Tenant))
+async def get_current_tenant(session: AsyncSession) -> Tenant:
+    # RLS limits `tenants` to the row whose id matches the session's tenant, and the
+    # TenantSession dependency has already checked that the row exists and is active.
+    return (await session.scalars(select(Tenant))).one()
 
 
 async def sync_current_user(session: AsyncSession, principal: Principal) -> CurrentUser:
@@ -36,10 +29,6 @@ async def sync_current_user(session: AsyncSession, principal: Principal) -> Curr
     can reference users and so admins can see who has used the tenant.
     """
     tenant = await get_current_tenant(session)
-    if tenant is None:
-        raise TenantNotProvisionedError
-    if tenant.status != "active":
-        raise TenantSuspendedError
 
     stmt: Any = (
         insert(User)

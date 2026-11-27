@@ -34,6 +34,10 @@ class AuditEventOut(BaseModel):
 async def list_audit_events(
     session: TenantSession,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: Annotated[
+        int | None, Query(ge=1, description="Return events older than this event id.")
+    ] = None,
 ) -> list[AuditEventOut]:
-    events = await service.list_recent(session, limit)
+    """Newest first. For the next page, pass the last id of this page as ``before``."""
+    events = await service.list_recent(session, limit, before)
     return [AuditEventOut.model_validate(e) for e in events]

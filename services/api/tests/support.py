@@ -2,6 +2,7 @@
 
 import time
 import uuid
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,6 +12,14 @@ from jwt.algorithms import RSAAlgorithm
 
 from app.core.config import Environment, Settings
 from app.core.security import JwksCache, TokenVerifier
+from app.modules.llm.answers import (
+    AnswerEvent,
+    AnswerGenerationError,
+    Citation,
+    Finished,
+    Passage,
+    TextDelta,
+)
 
 ISSUER = "https://idp.test/realms/atlas"
 AUDIENCE = "atlas-api"
@@ -81,4 +90,69 @@ class FakeIdP:
         signer = key or self.keys[0]
         return jwt.encode(
             payload, signer.private_key, algorithm="RS256", headers={"kid": signer.kid}
+        )
+
+
+def minimal_pdf(pages: list[str]) -> bytes:
+    """Build a small, valid PDF with one line of text per page (ASCII only)."""
+    objects: list[bytes] = []
+    page_ids = [4 + 2 * i for i in range(len(pages))]
+    kids = " ".join(f"{i} 0 R" for i in page_ids)
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode())
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    for index, text in enumerate(pages):
+        escaped = text.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+        stream = f"BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET".encode()
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 3 0 R >> >> "
+            f"/Contents {page_ids[index] + 1} 0 R >>".encode()
+        )
+        objects.append(f"<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"\nendstream")
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    )
+    return bytes(out)
+
+
+@dataclass
+class ScriptedAnswerGenerator:
+    """Stands in for the model: answers with one cited sentence per call.
+
+    It quotes the start of the first passage, as the real API would, so tests can check
+    that citations are mapped back to the right document and position.
+    """
+
+    calls: list[tuple[str, list[Passage]]] = field(default_factory=list)
+    refuse: bool = False
+    fail: bool = False
+
+    async def stream_answer(
+        self, question: str, passages: Sequence[Passage]
+    ) -> AsyncIterator[AnswerEvent]:
+        self.calls.append((question, list(passages)))
+        if self.fail:
+            raise AnswerGenerationError("The model is temporarily unavailable.")
+        yield TextDelta(0, "According to the documents, ")
+        quote = passages[0].text[:30]
+        yield TextDelta(1, "this is ")
+        yield Citation(segment=1, passage_index=0, cited_text=quote, start_char=0, end_char=30)
+        yield TextDelta(1, "the answer.")
+        yield Finished(
+            model="scripted",
+            stop_reason="refusal" if self.refuse else "end_turn",
+            input_tokens=100,
+            output_tokens=20,
+            refused=self.refuse,
         )

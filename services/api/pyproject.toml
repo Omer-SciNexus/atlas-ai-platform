@@ -5,7 +5,7 @@ description = "Atlas API: multi-tenant enterprise AI knowledge and agent platfor
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi>=0.115",
+    "fastapi>=0.121",  # Depends(scope="function")
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
@@ -16,6 +16,10 @@ dependencies = [
     "pyjwt[crypto]>=2.10",
     "httpx>=0.28",
     "redis>=5.2",
+    "anthropic>=2.14.0",
+    "pgvector>=0.5.1",
+    "pypdf>=7.2.0",
+    "python-multipart>=0.0.34",
 ]
 
 [dependency-groups]
@@ -60,7 +64,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["migrations/"]
 
 [[tool.mypy.overrides]]
-module = ["testcontainers.*"]
+module = ["testcontainers.*", "asyncpg.*", "docker.*", "pgvector.*"]
 ignore_missing_imports = true
 
 # ---------- pytest ----------
@@ -70,3 +74,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = ["integration: needs Docker (Postgres via testcontainers)"]
 addopts = "-ra --strict-markers"
+
+# ---------- coverage ----------
+[tool.coverage.run]
+# SQLAlchemy's async engine runs on greenlets; without this, lines after an await in a
+# request handler are reported as not covered.
+concurrency = ["greenlet", "thread"]

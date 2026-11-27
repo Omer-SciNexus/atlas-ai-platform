@@ -30,6 +30,11 @@ class AuthError(Exception):
     """Raised for any invalid token. The message is safe to return to the client."""
 
 
+class IdentityProviderUnavailableError(AuthError):
+    """Signing keys could not be loaded, so no token can be checked. A 503, not a 401:
+    the caller's token may be fine, and clients should retry instead of logging out."""
+
+
 @dataclass(frozen=True, slots=True)
 class Principal:
     subject: str
@@ -43,7 +48,9 @@ def http_jwks_fetcher(url: str, client: httpx.AsyncClient) -> JwksFetcher:
     async def fetch() -> dict[str, Any]:
         resp = await client.get(url, timeout=5.0)
         resp.raise_for_status()
-        data: dict[str, Any] = resp.json()
+        data = resp.json()  # ValueError on a non-JSON body
+        if not isinstance(data, dict) or not isinstance(data.get("keys"), list):
+            raise ValueError("JWKS response is not a key set")
         return data
 
     return fetch
@@ -66,16 +73,17 @@ class JwksCache:
                     return
             try:
                 jwks = await self._fetch()
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, ValueError) as exc:
+                # ValueError: the IdP answered, but not with a usable key set.
                 # Keep serving the keys we have; an IdP blip must not log everyone out.
                 log.warning("jwks.fetch_failed", error=type(exc).__name__, cached=len(self._keys))
                 if not self._keys:
-                    raise AuthError("Signing keys unavailable") from None
+                    raise IdentityProviderUnavailableError("Signing keys unavailable") from None
                 self._loaded_at = time.monotonic()
                 return
             keys: dict[str, PyJWK] = {}
             for jwk in jwks.get("keys", []):
-                if jwk.get("use", "sig") != "sig" or "kid" not in jwk:
+                if not isinstance(jwk, dict) or jwk.get("use", "sig") != "sig" or "kid" not in jwk:
                     continue
                 try:
                     keys[jwk["kid"]] = PyJWK.from_dict(jwk)

@@ -1,11 +1,12 @@
 import uuid
+from typing import Any
 
 import httpx
 import jwt
 import pytest
 
 from app.core.rbac import Role
-from app.core.security import AuthError, JwksCache, TokenVerifier
+from app.core.security import AuthError, JwksCache, TokenVerifier, http_jwks_fetcher
 from tests.support import FakeIdP, SigningKey, make_settings
 
 TENANT = uuid.UUID("3f6c1c2e-8a4b-4f0e-9d51-2b7a6c1e0a01")
@@ -70,7 +71,7 @@ async def test_rejects_hs256_key_confusion(idp: FakeIdP, verifier: TokenVerifier
 
 
 async def test_rejects_alg_none(verifier: TokenVerifier) -> None:
-    token = jwt.encode({"sub": "x"}, key=None, algorithm="none")
+    token = jwt.encode({"sub": "x"}, key=None, algorithm="none")  # type: ignore[arg-type]
     with pytest.raises(AuthError, match="Unsupported token algorithm"):
         await verifier.verify(token)
 
@@ -104,9 +105,43 @@ async def test_keeps_cached_keys_when_idp_is_down(idp: FakeIdP) -> None:
             raise httpx.ConnectError("idp down")
         return await idp.fetch_jwks()
 
-    cache = JwksCache(flaky_fetch, ttl_seconds=0, min_refresh_seconds=0)  # type: ignore[arg-type]
+    cache = JwksCache(flaky_fetch, ttl_seconds=0, min_refresh_seconds=0)
     verifier = TokenVerifier(make_settings(), cache)
     await verifier.verify(idp.token(tenant_id=TENANT))
     # TTL expired and the IdP is down, but the cached key still verifies.
+    principal = await verifier.verify(idp.token(tenant_id=TENANT))
+    assert principal.tenant_id == TENANT
+
+
+def _idp_returning(body: str) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body, headers={"content-type": "text/html"})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize("body", ["<html>login page</html>", '{"error": "x"}', "[]"])
+async def test_garbage_jwks_response_is_an_auth_error(idp: FakeIdP, body: str) -> None:
+    async with _idp_returning(body) as client:
+        cache = JwksCache(http_jwks_fetcher("https://idp.test/certs", client), ttl_seconds=600)
+        verifier = TokenVerifier(make_settings(), cache)
+        with pytest.raises(AuthError, match="Signing keys unavailable"):
+            await verifier.verify(idp.token(tenant_id=TENANT))
+
+
+async def test_keeps_cached_keys_when_idp_returns_garbage(idp: FakeIdP) -> None:
+    calls = 0
+
+    async def fetch() -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise ValueError("JWKS response is not a key set")
+        return await idp.fetch_jwks()
+
+    verifier = TokenVerifier(
+        make_settings(), JwksCache(fetch, ttl_seconds=0, min_refresh_seconds=0)
+    )
+    await verifier.verify(idp.token(tenant_id=TENANT))
     principal = await verifier.verify(idp.token(tenant_id=TENANT))
     assert principal.tenant_id == TENANT

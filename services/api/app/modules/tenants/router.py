@@ -1,15 +1,11 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.core.deps import CurrentPrincipal, TenantSession
 from app.core.rbac import ROLE_PERMISSIONS, Role
-from app.modules.tenants.service import (
-    TenantNotProvisionedError,
-    TenantSuspendedError,
-    sync_current_user,
-)
+from app.modules.tenants.service import sync_current_user
 
 router = APIRouter(prefix="/v1", tags=["identity"])
 
@@ -31,12 +27,7 @@ class MeOut(BaseModel):
 
 @router.get("/me", response_model=MeOut)
 async def me(principal: CurrentPrincipal, session: TenantSession) -> MeOut:
-    try:
-        current = await sync_current_user(session, principal)
-    except TenantNotProvisionedError:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Tenant is not provisioned") from None
-    except TenantSuspendedError:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Tenant is suspended") from None
+    current = await sync_current_user(session, principal)
 
     return MeOut(
         user_id=current.user.id,

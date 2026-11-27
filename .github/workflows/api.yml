@@ -1,0 +1,50 @@
+name: api
+
+on:
+  push:
+    branches: [master, staging]
+    paths: ["services/api/**", ".github/workflows/api.yml"]
+  pull_request:
+    paths: ["services/api/**", ".github/workflows/api.yml"]
+
+concurrency:
+  group: api-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: services/api
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy app tests scripts
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      # Docker is available on GitHub-hosted runners, so the integration tests
+      # (Postgres + pgvector via testcontainers) run here too.
+      - run: uv run pytest --cov=app --cov-report=term-missing
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t atlas-api:ci .
