@@ -4,9 +4,9 @@
 
 A multi-tenant enterprise AI knowledge and agent platform.
 
-**Status:** the tenancy foundation and the document question-answering backend are built:
-upload a document, and ask questions that are answered from it with citations. There is no
-web app yet (`apps/web` holds only image assets), and the later phases below are not built.
+**Status:** the tenancy foundation and document question answering are built, with a web
+app: sign in, upload a document, and ask questions that are answered from it with citations.
+Conversations are not stored yet, and the later phases below are not built.
 
 ## What works today
 
@@ -21,6 +21,9 @@ web app yet (`apps/web` holds only image assets), and the later phases below are
   its position in the source document. Answers stream as server-sent events.
 - **Audit log.** Uploads, deletions, ingestion results and questions are recorded in an
   append-only table.
+- **Web app.** Single sign-on, a streaming answer view where each citation opens the source
+  passage with the quote highlighted, document upload with live ingestion status, passage
+  search, and the audit log for admins. Light and dark themes; works on a phone.
 
 The design decisions are written down in [docs/adr](docs/adr/README.md).
 
@@ -29,7 +32,7 @@ The design decisions are written down in [docs/adr](docs/adr/README.md).
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Tenancy foundation: OIDC auth, RBAC, Postgres row-level security, audit log | Done |
-| 1 | Basic RAG with citations: ingestion, vector search, grounded answers | Backend done; conversations and web app next |
+| 1 | Basic RAG with citations: ingestion, vector search, grounded answers | Done, except stored conversations |
 | 2 | Advanced RAG (hybrid search, reranking) and evals | Planned |
 | 3 | LLM gateway | Planned |
 | 4 | Agents and MCP with human approval | Planned |
@@ -41,8 +44,8 @@ The design decisions are written down in [docs/adr](docs/adr/README.md).
 
 ```
 services/api/     FastAPI service and ingestion worker (Python 3.13, uv): see services/api/README.md
+apps/web/         Web app (Next.js, TypeScript, Tailwind): see apps/web/README.md
 infra/compose/    Local Postgres (pgvector), Redis and Keycloak
-apps/web/         Web app (Next.js, not started; image assets only)
 docs/adr/         Architecture decision records
 docs/assets/      Images
 ```
@@ -57,7 +60,11 @@ pnpm db:migrate    # apply migrations (owner role)
 pnpm db:seed       # create the demo tenants
 pnpm api:dev       # API on http://localhost:8000 (OpenAPI docs at /docs)
 pnpm worker:dev    # ingestion worker, in a second terminal
+pnpm install       # web app dependencies (once)
+pnpm web:dev       # web app on http://localhost:3000, in a third terminal
 ```
+
+Open http://localhost:3000 and sign in as one of the demo users below.
 
 No `.env` is needed to start. With no keys set:
 
@@ -67,7 +74,7 @@ No `.env` is needed to start. With no keys set:
 Copy `.env.example` to `.env` to set keys (`ATLAS_ANTHROPIC_API_KEY`, and
 `ATLAS_EMBEDDING_PROVIDER=voyage` with `ATLAS_VOYAGE_API_KEY` for real embeddings).
 
-Get a token for a demo user, upload a document and ask a question:
+The same flow from the command line: get a token for a demo user, upload a document and ask a question:
 
 ```bash
 TOKEN=$(curl -s -X POST http://localhost:8080/realms/atlas/protocol/openid-connect/token \
@@ -102,4 +109,4 @@ Carol cannot see or search Alice's documents: they are in different tenants.
 The Keycloak admin console is at http://localhost:8080 (admin / admin). All of these credentials
 are local-only; the API refuses default credentials in staging and production.
 
-Other commands: `pnpm api:test`, `pnpm api:lint`, `pnpm dev:infra:down`.
+Other commands: `pnpm api:test`, `pnpm api:lint`, `pnpm web:test`, `pnpm web:lint`, `pnpm dev:infra:down`.
