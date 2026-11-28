@@ -12,3 +12,4 @@ A record is not edited after it is accepted; a later record replaces it.
 | [0005](0005-job-queue-in-postgres.md) | The ingestion queue is a Postgres table | Accepted |
 | [0006](0006-embedding-model-and-fixed-dimensions.md) | One embedding size (1024), Voyage in production, a keyless embedder for development | Accepted |
 | [0007](0007-citations-from-the-model-api.md) | Citations come from the Claude citations feature, not from parsing the answer | Accepted |
+| [0008](0008-web-app-signs-in-from-the-browser.md) | The web app signs in from the browser (PKCE) and calls the API directly | Accepted |
